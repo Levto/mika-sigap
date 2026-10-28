@@ -8,6 +8,7 @@ import ExcelJS from 'exceljs';
 const directory = dirname(fileURLToPath(import.meta.url));
 const database = new DatabaseSync(join(directory, 'entries.sqlite'));
 const port = Number(process.env.PORT) || 3000;
+const host = process.env.HOST || '0.0.0.0';
 const sourceOptions = [
   'Whatsapp Gateway',
   'Google Review',
@@ -776,6 +777,6 @@ const server = createServer(async (request, response) => {
   return sendJson(response, 404, { error: 'Halaman tidak ditemukan.' });
 });
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`Entry Register is running at http://localhost:${port}`);
+server.listen(port, host, () => {
+  console.log(`Entry Register is listening on ${host}:${port}`);
 });
