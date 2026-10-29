@@ -1,25 +1,26 @@
-const typeOptions = {
-  'Seksi Pelayanan dan Verifikasi Dokumen Perjalanan': [
-    'Petugas Wawancara',
-    'Customer Service',
-    'Pengambilan Paspor'
-  ],
-  'Seksi Intelijen dan Penindakan Keimigrasian': [
-    'Petugas BAP Paspor',
-    'Petugas BAP WNA',
-    'Petugas Pengawasan Keimigrasian'
-  ],
-  'Seksi Izin Tinggal dan Status Keimigrasian': [
-    'Petugas Foto dan Biometrik Asing'
-  ],
-  'Seksi Teknologi Informasi dan Komunikasi Keimigrasian': [
-    'Petugas WA Gateway/Medsos',
-    'Petugas Layanan Asing'
-  ],
-  'Tata Usaha': ['Kepegawaian', 'Keuangan', 'Umum', 'Kepala Kantor']
-};
-const sourceOptions = ['Whatsapp Gateway', 'Google Review', 'Email', 'DM Media Sosial'];
+const typeOptions = [
+  'Seksi Pelayanan dan Verifikasi Dokumen Perjalanan',
+  'Seksi Intelijen dan Penindakan Keimigrasian',
+  'Seksi Izin Tinggal dan Status Keimigrasian',
+  'Seksi Teknologi Informasi dan Komunikasi Keimigrasian',
+  'Tata Usaha'
+];
+const sourceOptions = ['Whatsapp Gateway', 'Google Review', 'Email', 'DM Media Sosial', 'SP4N-Lapor!', 'Unit Layanan Pengaduan (ULP)'];
 const statusOptions = ['Sedang Ditindaklanjuti', 'Selesai'];
+
+function updateParallax() {
+  const scrollY = window.scrollY || window.pageYOffset;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const docH = document.documentElement.scrollHeight - vh;
+  const progress = docH > 0 ? scrollY / docH : 0;
+  const resolutionFactor = Math.max(0.4, Math.min(2, vw / 1366));
+  const moveY = scrollY * 0.2 * resolutionFactor;
+  document.body.style.backgroundPosition = `center ${50 - progress * 30}px`;
+}
+window.addEventListener('scroll', updateParallax, { passive: true });
+window.addEventListener('resize', updateParallax, { passive: true });
+updateParallax();
 const page = window.location.pathname === '/entries'
   ? 'entries'
   : window.location.pathname === '/pertanyaan' ? 'pertanyaan'
@@ -33,6 +34,15 @@ document.querySelectorAll('[data-route]').forEach((link) => {
   link.classList.toggle('active', active);
   if (active) link.setAttribute('aria-current', 'page');
 });
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = (error) => reject(error);
+  });
+}
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -48,21 +58,6 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-function wrapChartLabel(label, maxLength) {
-  const lines = [];
-  let line = '';
-  for (const word of label.split(/\s+/)) {
-    if (line && `${line} ${word}`.length > maxLength) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = line ? `${line} ${word}` : word;
-    }
-  }
-  if (line) lines.push(line);
-  return lines;
 }
 
 function localDateValue() {
@@ -127,21 +122,25 @@ function renderForm() {
           <label class="field"><span class="field-label">Seksi Terlapor <span class="required">*</span></span>
             <select id="type" name="type" required></select>
           </label>
-          <label class="field"><span class="field-label">Bagian <span class="required">*</span></span>
-            <select id="subtype" name="subtype" required></select>
+          <label class="field"><span class="field-label">Tanggal Aduan <span class="required">*</span></span>
+            <input id="report-date" name="reportDate" type="date" required />
           </label>
         </div>
         <div class="field-row source-date-row">
-          <label class="field source-field"><span class="field-label">Sumber Aduan <span class="required">*</span></span>
+          <label class="field source-field"><span class="field-label">Sarana Pengaduan <span class="required">*</span></span>
             <select id="source" name="source" required></select>
           </label>
-          <label class="field"><span class="field-label">Tanggal Aduan <span class="required">*</span></span>
-            <input id="report-date" name="reportDate" type="date" required />
+          <label class="field"><span class="field-label">Tanggal Peristiwa <span class="required">*</span></span>
+            <input id="event-date" name="eventDate" type="date" required />
           </label>
         </div>
         <label class="field description-field"><span class="field-label">Deskripsi Aduan <span class="optional">OPSIONAL</span></span>
           <textarea id="description" name="description" rows="5" maxlength="5000" placeholder="Tuliskan detail aduan..."></textarea>
           <span class="field-hint"><span>Maksimal 5.000 karakter.</span><span id="char-count">0 / 5000</span></span>
+        </label>
+        <label class="field"><span class="field-label">Data Dukung <span class="optional">OPSIONAL</span></span>
+          <input id="attachments" name="attachments" type="file" multiple accept="image/*" />
+          <span class="field-hint"><span>Pilih satu atau lebih gambar (PNG, JPG, WEBP).</span></span>
         </label>
         <div class="form-bottom">
           <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
@@ -150,20 +149,33 @@ function renderForm() {
       </form>
     </section>
     <aside class="side-note"><span class="note-mark" aria-hidden="true">✳</span><p>Data aduan tersimpan di basis data lokal pada perangkat ini.</p></aside>
+    <dialog id="save-success-dialog" class="edit-dialog">
+      <form method="dialog">
+        <div class="dialog-heading">
+          <div><h2>Berhasil Disimpan</h2></div>
+          <button class="dialog-close" type="button" aria-label="Tutup">×</button>
+        </div>
+        <p id="save-success-message" class="dialog-edit-info"></p>
+        <div class="dialog-actions">
+          <button class="submit-button" type="submit">Tutup</button>
+        </div>
+      </form>
+    </dialog>
   `;
 
   const form = document.querySelector('#entry-form');
   const type = document.querySelector('#type');
-  const subtype = document.querySelector('#subtype');
   const source = document.querySelector('#source');
   const reportDate = document.querySelector('#report-date');
+  const eventDate = document.querySelector('#event-date');
   const description = document.querySelector('#description');
   const count = document.querySelector('#char-count');
   const message = document.querySelector('#form-message');
   const button = form.querySelector('button');
   reportDate.value = localDateValue();
+  eventDate.value = localDateValue();
 
-  for (const value of Object.keys(typeOptions)) {
+  for (const value of typeOptions) {
     const option = document.createElement('option');
     option.value = value;
     option.textContent = value;
@@ -176,20 +188,9 @@ function renderForm() {
     source.append(option);
   }
 
-  function updateSubtypes() {
-    subtype.replaceChildren(...typeOptions[type.value].map((value) => {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = value;
-      return option;
-    }));
-  }
-
-  type.addEventListener('change', updateSubtypes);
   description.addEventListener('input', () => {
     count.textContent = `${description.value.length} / 5000`;
   });
-  updateSubtypes();
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -197,25 +198,48 @@ function renderForm() {
     button.disabled = true;
     button.querySelector('span').textContent = 'Menyimpan...';
     try {
+      const attachmentFiles = document.querySelector('#attachments').files;
       const response = await fetch('/api/entries', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           type: type.value,
-          subtype: subtype.value,
           source: source.value,
           reportDate: reportDate.value,
+          eventDate: eventDate.value,
           description: description.value
         })
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Aduan tidak dapat disimpan.');
+      const entryId = result.id;
+
+      if (attachmentFiles.length > 0) {
+        const filesData = [];
+        for (const file of attachmentFiles) {
+          const base64 = await fileToBase64(file);
+          filesData.push({ filename: file.name, data: base64 });
+        }
+        const uploadResponse = await fetch(`/api/entries/${entryId}/attachments`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ files: filesData })
+        });
+        if (!uploadResponse.ok) {
+          const uploadError = await uploadResponse.json();
+          throw new Error(uploadError.error || 'Gagal mengunggah berkas pendukung.');
+        }
+      }
+
       form.reset();
-      updateSubtypes();
       reportDate.value = localDateValue();
+      eventDate.value = localDateValue();
       count.textContent = '0 / 5000';
-      message.textContent = 'Aduan berhasil disimpan.';
-      message.classList.add('success');
+      message.textContent = '';
+      message.classList.remove('success');
+      const saveDialog = document.querySelector('#save-success-dialog');
+      saveDialog.querySelector('#save-success-message').textContent = 'Aduan berhasil disimpan.';
+      saveDialog.showModal();
     } catch (error) {
       message.textContent = error.message;
       message.classList.remove('success');
@@ -223,6 +247,13 @@ function renderForm() {
       button.disabled = false;
       button.querySelector('span').textContent = 'Simpan Aduan';
     }
+  });
+
+  const saveDialog = document.querySelector('#save-success-dialog');
+  saveDialog.querySelector('.dialog-close').addEventListener('click', () => saveDialog.close());
+  saveDialog.querySelector('form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    saveDialog.close();
   });
 }
 
@@ -266,9 +297,9 @@ function renderEntries(entries, filters = {}) {
         </div>
         <div class="dialog-fields">
           <label class="field"><span class="field-label">Seksi Terlapor <span class="required">*</span></span><select name="type" required></select></label>
-          <label class="field"><span class="field-label">Bagian <span class="required">*</span></span><select name="subtype" required></select></label>
-          <label class="field"><span class="field-label">Sumber Aduan <span class="required">*</span></span><select name="source" required></select></label>
           <label class="field"><span class="field-label">Tanggal Aduan <span class="required">*</span></span><input name="reportDate" type="date" required /></label>
+          <label class="field"><span class="field-label">Sarana Pengaduan <span class="required">*</span></span><select name="source" required></select></label>
+          <label class="field"><span class="field-label">Tanggal Peristiwa <span class="required">*</span></span><input name="eventDate" type="date" required /></label>
           <label class="field dialog-description"><span class="field-label">Deskripsi Aduan</span><textarea name="description" rows="4" maxlength="5000"></textarea></label>
           <label class="field"><span class="field-label">Status Aduan <span class="required">*</span></span><select name="status" required></select></label>
           <label class="field"><span class="field-label">Tanggal Tindak Lanjut <span class="required">*</span></span><input name="followUpDate" type="date" required /></label>
@@ -281,6 +312,19 @@ function renderEntries(entries, filters = {}) {
         </div>
       </form>
     </dialog>
+    <dialog id="attachment-dialog" class="edit-dialog">
+      <form method="dialog">
+        <div class="dialog-heading">
+          <div><h2>Data Dukung</h2></div>
+          <button class="dialog-close" type="button" aria-label="Tutup">×</button>
+        </div>
+        <div id="attachment-images" class="attachment-images"></div>
+        <p id="attachment-message" class="form-message" role="status" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button class="submit-button" type="submit">Tutup</button>
+        </div>
+      </form>
+    </dialog>
   `;
 
   const list = document.querySelector('#entry-list');
@@ -288,7 +332,6 @@ function renderEntries(entries, filters = {}) {
   const editForm = document.querySelector('#edit-entry-form');
   const editMessage = document.querySelector('#edit-message');
   const editType = editForm.elements.type;
-  const editSubtype = editForm.elements.subtype;
   let editingId = null;
   const monthFilter = document.querySelector('#entry-month-filter');
   const statusFilter = document.querySelector('#entry-status-filter');
@@ -331,18 +374,12 @@ function renderEntries(entries, filters = {}) {
     });
   });
 
-  for (const value of Object.keys(typeOptions)) {
+  for (const value of typeOptions) {
     editType.add(new Option(value, value));
   }
   for (const value of sourceOptions) editForm.elements.source.add(new Option(value, value));
   for (const value of statusOptions) editForm.elements.status.add(new Option(value, value));
 
-  function updateEditSubtypes(selectedValue) {
-    editSubtype.replaceChildren(...typeOptions[editType.value].map((value) => new Option(value, value)));
-    if (selectedValue && typeOptions[editType.value].includes(selectedValue)) editSubtype.value = selectedValue;
-  }
-
-  editType.addEventListener('change', () => updateEditSubtypes());
   const reportDateInput = editForm.elements.reportDate;
   const followUpDateInput = editForm.elements.followUpDate;
   function validateFollowUpDate() {
@@ -376,13 +413,14 @@ function renderEntries(entries, filters = {}) {
     <thead><tr>
       <th>NO.</th>
       <th>TANGGAL ADUAN</th>
+      <th>TANGGAL PERISTIWA</th>
       <th>SEKSI TERLAPOR</th>
-      <th>BAGIAN</th>
-      <th>SUMBER ADUAN</th>
+      <th>SARANA PENGADUAN</th>
       <th>DESKRIPSI</th>
       <th>STATUS</th>
       <th>TANGGAL TINDAK LANJUT</th>
       <th>TINDAK LANJUT</th>
+      <th>DATA DUKUNG</th>
       <th>AKSI</th>
     </tr></thead>
     <tbody></tbody>
@@ -395,8 +433,8 @@ function renderEntries(entries, filters = {}) {
     row.append(
       element('td', 'table-number', String(entryIndex + 1)),
       element('td', '', displayDate(entry.report_date)),
+      element('td', '', displayDate(entry.event_date)),
       element('td', 'table-section', entry.type),
-      element('td', '', entry.subtype),
       element('td', '', entry.source),
       element('td', 'table-description', entry.description || '-')
     );
@@ -407,6 +445,13 @@ function renderEntries(entries, filters = {}) {
       element('td', '', displayDate(entry.follow_up_date)),
       element('td', 'follow-up-cell', entry.follow_up || '-')
     );
+    const attachmentCell = document.createElement('td');
+    attachmentCell.className = 'attachment-cell';
+    const attachmentButton = element('button', 'entry-action attachment-action', 'Lihat Gambar');
+    attachmentButton.type = 'button';
+    attachmentButton.disabled = true;
+    attachmentCell.append(attachmentButton);
+    row.append(attachmentCell);
     const actions = element('div', 'entry-actions');
     const editButton = element('button', 'entry-action edit-action', 'Edit');
     editButton.type = 'button';
@@ -422,9 +467,9 @@ function renderEntries(entries, filters = {}) {
     editButton.addEventListener('click', () => {
       editingId = entry.id;
       editType.value = entry.type;
-      updateEditSubtypes(entry.subtype);
       editForm.elements.source.value = entry.source;
       reportDateInput.value = entry.report_date;
+      editForm.elements.eventDate.value = entry.event_date || entry.report_date;
       editForm.elements.status.value = entry.status || statusOptions[0];
       followUpDateInput.value = entry.follow_up_date || '';
       validateFollowUpDate();
@@ -445,6 +490,19 @@ function renderEntries(entries, filters = {}) {
         window.alert(error.message);
       }
     });
+
+    fetch(`/api/entries/${entry.id}/attachments`)
+      .then((res) => res.json())
+      .then((attachments) => {
+        if (attachments.length > 0) {
+          attachmentButton.textContent = `Gambar (${attachments.length})`;
+          attachmentButton.disabled = false;
+          attachmentButton.addEventListener('click', () => {
+            openAttachmentDialog(entry.id, attachments);
+          });
+        }
+      })
+      .catch(() => {});
   });
 
   editForm.addEventListener('submit', async (event) => {
@@ -468,6 +526,46 @@ function renderEntries(entries, filters = {}) {
       saveButton.disabled = false;
     }
   });
+}
+
+function openAttachmentDialog(entryId, attachments) {
+  const dialog = document.querySelector('#attachment-dialog');
+  const imagesContainer = document.querySelector('#attachment-images');
+  const message = document.querySelector('#attachment-message');
+  imagesContainer.innerHTML = '';
+  message.textContent = '';
+
+  if (!attachments || attachments.length === 0) {
+    message.textContent = 'Tidak ada berkas pendukung.';
+    dialog.showModal();
+    return;
+  }
+
+  attachments.forEach((att) => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'attachment-item';
+    const img = document.createElement('img');
+    img.src = `/uploads/${att.filename}`;
+    img.alt = att.original_name;
+    img.style.maxWidth = '200px';
+    img.style.maxHeight = '200px';
+    img.style.border = '1px solid var(--line)';
+    img.style.borderRadius = '3px';
+    const name = document.createElement('div');
+    name.textContent = att.original_name;
+    name.style.fontSize = '12px';
+    name.style.marginTop = '6px';
+    name.style.color = 'var(--muted)';
+    wrapper.append(img, name);
+    imagesContainer.append(wrapper);
+  });
+
+  dialog.querySelector('.dialog-close').onclick = () => dialog.close();
+  dialog.querySelector('form').onsubmit = (event) => {
+    event.preventDefault();
+    dialog.close();
+  };
+  dialog.showModal();
 }
 
 function renderDashboard() {
@@ -510,15 +608,9 @@ function renderDashboard() {
         <div class="distribution-total"><span class="total-label">Total Aduan</span><strong id="summary-total">0</strong><span id="summary-period">PERIODE TERPILIH</span></div>
       </div>
     </section>
-    <section class="subsection-area" aria-labelledby="subsection-heading">
-      <div class="subsection-heading">
-        <div><p class="eyebrow">RINCIAN ADUAN</p><h2 id="subsection-heading">Aduan per Seksi</h2></div>
-      </div>
-      <div class="subsection-grid" id="subsection-grid"></div>
-    </section>
     <section class="chart-panel distribution-panel source-distribution-panel" aria-labelledby="source-distribution-heading">
       <div class="chart-panel-heading">
-        <div><p class="eyebrow">SUMBER ADUAN</p><h2 id="source-distribution-heading">Jumlah Aduan per Sumber</h2></div>
+        <div><p class="eyebrow">SARANA ADUAN</p><h2 id="source-distribution-heading">Jumlah Aduan berdasarkan Sarana</h2></div>
       </div>
       <div class="distribution-content">
         <div class="pie-chart-wrap"><canvas id="source-chart" role="img" aria-label="Diagram pie jumlah aduan per sumber"></canvas></div>
@@ -666,7 +758,7 @@ function renderDashboard() {
 function drawDashboard(stats) {
   while (dashboardCharts.length) dashboardCharts.pop().destroy();
 
-  const palette = ['#01243F', '#E4BD6B', '#35546B', '#B28D43', '#8196A3'];
+  const palette = ['#043666', '#1594B8', '#32A889', '#E4BD6B', '#E67E52', '#7C6BC4'];
   const gridColor = '#e1e7eb';
   const tickColor = '#647988';
   const month = document.querySelector('#dashboard-month').value;
@@ -687,8 +779,8 @@ function drawDashboard(stats) {
       labels: timelineLabels,
       datasets: [{
         data: stats.timeline.map((item) => item.count),
-        backgroundColor: '#01243F',
-        hoverBackgroundColor: '#E4BD6B',
+        backgroundColor: '#043666',
+        hoverBackgroundColor: '#1594B8',
         borderRadius: 3,
         maxBarThickness: 24
       }]
@@ -739,56 +831,6 @@ function drawDashboard(stats) {
     ? 'SEMUA WAKTU'
     : yearly ? `TAHUN ${month.slice(0, 4)}` : monthText.toLocaleUpperCase('id-ID');
 
-  const grid = document.querySelector('#subsection-grid');
-  grid.replaceChildren();
-  stats.sections.forEach((section, index) => {
-    const panel = element('article', 'subsection-panel');
-    const heading = element('div', 'subsection-card-heading');
-    heading.append(element('h3', '', section.type), element('span', 'subsection-total', `${section.count.toLocaleString('id-ID')} Aduan`));
-    const canvasWrap = element('div', 'subsection-chart-wrap');
-    const canvas = document.createElement('canvas');
-    canvas.setAttribute('role', 'img');
-    canvas.setAttribute('aria-label', `Jumlah aduan per bagian: ${section.type}`);
-    canvasWrap.append(canvas);
-    panel.append(heading, canvasWrap);
-    grid.append(panel);
-
-    dashboardCharts.push(new window.Chart(canvas, {
-      type: 'bar',
-      data: {
-        labels: section.subtypes.map((item) => item.subtype),
-        datasets: [{ data: section.subtypes.map((item) => item.count), backgroundColor: palette[index % palette.length], borderRadius: 3, maxBarThickness: 22 }]
-      },
-      options: {
-        indexAxis: 'y',
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            titleFont: { size: 13 },
-            bodyFont: { size: 13 },
-            callbacks: { label: (context) => `${context.label}: ${context.raw}` }
-          }
-        },
-        scales: {
-          x: { beginAtZero: true, ticks: { precision: 0, stepSize: 1, color: tickColor, font: { size: 12 } }, grid: { color: gridColor } },
-          y: {
-            grid: { display: false },
-            ticks: {
-              color: tickColor,
-              font: { size: 12 },
-              callback(value) {
-                const label = this.getLabelForValue(value);
-                return wrapChartLabel(label, 20);
-              }
-            }
-          }
-        }
-      }
-    }));
-  });
-
   const sourceColors = stats.sources.map((_, index) => palette[index % palette.length]);
   dashboardCharts.push(new window.Chart(document.querySelector('#source-chart'), {
     type: 'pie',
@@ -820,8 +862,8 @@ function drawDashboard(stats) {
       labels: questionTimelineLabels,
       datasets: [{
         data: stats.questionTimeline.map((item) => item.count),
-        backgroundColor: '#35546B',
-        hoverBackgroundColor: '#E4BD6B',
+        backgroundColor: '#1594B8',
+        hoverBackgroundColor: '#32A889',
         borderRadius: 3,
         maxBarThickness: 24
       }]
@@ -834,10 +876,12 @@ function drawDashboard(stats) {
         tooltip: {
           titleFont: { size: 13 },
           bodyFont: { size: 13 },
-          callbacks: {
-            title: (items) => yearly
-              ? `${items[0].label} ${month.slice(0, 4)}`
-              : `${monthText} ${items[0].label}`,
+            callbacks: {
+              title: (items) => stats.scope === 'all'
+                ? `${items[0].label}`
+                : yearly
+                ? `${items[0].label} ${month.slice(0, 4)}`
+                : `${monthText} ${items[0].label}`,
             label: (context) => `Jumlah Pertanyaan: ${context.raw.toLocaleString('id-ID')}`
           }
         }
@@ -874,9 +918,9 @@ function drawDashboard(stats) {
     questionLegend.append(row);
   });
   document.querySelector('#question-summary-total').textContent = stats.questionTotal.toLocaleString('id-ID');
-  document.querySelector('#question-summary-period').textContent = yearly
-    ? `TAHUN ${month.slice(0, 4)}`
-    : monthText.toLocaleUpperCase('id-ID');
+  document.querySelector('#question-summary-period').textContent = stats.scope === 'all'
+    ? 'SEMUA WAKTU'
+    : yearly ? `TAHUN ${month.slice(0, 4)}` : monthText.toLocaleUpperCase('id-ID');
 }
 
 function renderQuestionCategories(stats) {
