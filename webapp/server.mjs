@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { writeFileSync, readFileSync, statSync, unlinkSync, mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -9,47 +10,39 @@ const directory = dirname(fileURLToPath(import.meta.url));
 const database = new DatabaseSync(join(directory, 'entries.sqlite'));
 const port = Number(process.env.PORT) || 3000;
 const host = process.env.HOST || '0.0.0.0';
+const uploadDir = join(directory, 'uploads');
+try { mkdirSync(uploadDir, { recursive: true }); } catch {}
 const sourceOptions = [
   'Whatsapp Gateway',
   'Google Review',
   'Email',
-  'DM Media Sosial'
+  'DM Media Sosial',
+  'SP4N-Lapor!',
+  'Unit Layanan Pengaduan (ULP)'
 ];
 const statusOptions = ['Sedang Ditindaklanjuti', 'Selesai'];
 const questionCategorySeeds = [
   { id: 'alur-pembuatan-paspor', name: 'Alur Pembuatan Paspor' },
   { id: 'syarat-paspor', name: 'Syarat Paspor' }
 ];
-const subtypes = {
-  'Seksi Pelayanan dan Verifikasi Dokumen Perjalanan': [
-    'Petugas Wawancara',
-    'Customer Service',
-    'Pengambilan Paspor'
-  ],
-  'Seksi Intelijen dan Penindakan Keimigrasian': [
-    'Petugas BAP Paspor',
-    'Petugas BAP WNA',
-    'Petugas Pengawasan Keimigrasian'
-  ],
-  'Seksi Izin Tinggal dan Status Keimigrasian': [
-    'Petugas Foto dan Biometrik Asing'
-  ],
-  'Seksi Teknologi Informasi dan Komunikasi Keimigrasian': [
-    'Petugas WA Gateway/Medsos',
-    'Petugas Layanan Asing'
-  ],
-  'Tata Usaha': ['Kepegawaian', 'Keuangan', 'Umum', 'Kepala Kantor']
-};
+const sectionOptions = [
+  'Seksi Pelayanan dan Verifikasi Dokumen Perjalanan',
+  'Seksi Intelijen dan Penindakan Keimigrasian',
+  'Seksi Izin Tinggal dan Status Keimigrasian',
+  'Seksi Teknologi Informasi dan Komunikasi Keimigrasian',
+  'Tata Usaha'
+];
 
 function createEntriesTable() {
   database.exec(`
     CREATE TABLE entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type TEXT NOT NULL,
-    subtype TEXT NOT NULL,
-    source TEXT NOT NULL CHECK (source IN ('Whatsapp Gateway', 'Google Review', 'Email', 'DM Media Sosial')),
+    subtype TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL CHECK (source IN ('Whatsapp Gateway', 'Google Review', 'Email', 'DM Media Sosial', 'SP4N-Lapor!', 'Unit Layanan Pengaduan (ULP)')),
     description TEXT NOT NULL DEFAULT '',
     report_date TEXT NOT NULL,
+    event_date TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'Sedang Ditindaklanjuti' CHECK (status IN ('Sedang Ditindaklanjuti', 'Selesai')),
     follow_up_date DATE NOT NULL DEFAULT '',
     follow_up TEXT NOT NULL DEFAULT '',
@@ -101,6 +94,27 @@ if (!database.prepare('PRAGMA table_info(entries)').all().some((column) => colum
 if (!database.prepare('PRAGMA table_info(entries)').all().some((column) => column.name === 'follow_up')) {
   database.exec("ALTER TABLE entries ADD COLUMN follow_up TEXT NOT NULL DEFAULT ''");
 }
+if (!database.prepare('PRAGMA table_info(entries)').all().some((column) => column.name === 'event_date')) {
+  database.exec("ALTER TABLE entries ADD COLUMN event_date TEXT NOT NULL DEFAULT ''");
+}
+database.exec("UPDATE entries SET event_date = report_date WHERE event_date IS NULL OR event_date = ''");
+
+const entriesSchema = database.prepare(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entries'"
+).get().sql;
+if (!sourceOptions.every((source) => entriesSchema.includes(source))) {
+  const previousSequence = database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'entries'").get()?.seq || 0;
+  database.exec('BEGIN IMMEDIATE; ALTER TABLE entries RENAME TO entries_source_legacy;');
+  createEntriesTable();
+  database.exec(`
+    INSERT INTO entries (id, type, subtype, source, description, report_date, event_date, status, follow_up_date, follow_up, created_at)
+      SELECT id, type, subtype, source, description, report_date, event_date, status, follow_up_date, follow_up, created_at
+      FROM entries_source_legacy;
+    DROP TABLE entries_source_legacy;
+  `);
+  database.prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'entries'").run(previousSequence);
+  database.exec('COMMIT;');
+}
 
 function createQuestionCategoriesTable() {
   database.exec(`
@@ -116,6 +130,20 @@ function createQuestionCategoriesTable() {
   `);
 }
 createQuestionCategoriesTable();
+
+function createEntryAttachmentsTable() {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS entry_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entry_id INTEGER NOT NULL,
+      filename TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+    )
+  `);
+}
+createEntryAttachmentsTable();
 database.exec(`
   CREATE TABLE IF NOT EXISTS question_category_catalog (
     category_index INTEGER PRIMARY KEY,
@@ -174,11 +202,11 @@ function getCurrentQuestionMonth() {
 ensureQuestionCategoryMonth(getCurrentQuestionMonth());
 
 const addEntry = database.prepare(
-  'INSERT INTO entries (type, subtype, source, description, report_date, status, follow_up_date, follow_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  'INSERT INTO entries (type, subtype, source, description, report_date, event_date, status, follow_up_date, follow_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
 );
 const updateEntry = database.prepare(`
   UPDATE entries
-  SET type = ?, subtype = ?, source = ?, description = ?, report_date = ?, status = ?, follow_up_date = ?, follow_up = ?
+  SET type = ?, source = ?, description = ?, report_date = ?, event_date = ?, status = ?, follow_up_date = ?, follow_up = ?
   WHERE id = ?
 `);
 const deleteEntry = database.prepare('DELETE FROM entries WHERE id = ?');
@@ -191,7 +219,9 @@ const deleteEntry = database.prepare('DELETE FROM entries WHERE id = ?');
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
   '/chart.umd.js': ['node_modules/chart.js/dist/chart.umd.js', 'text/javascript; charset=utf-8'],
-  '/brand-logo.png': ['../logo_mika_sigap_high_resolution.png', 'image/png']
+  '/brand-logo.png': ['../logo_mika_sigap_high_resolution.png', 'image/png'],
+  '/logo_mika_sigap_high_resolution.png': ['../logo_mika_sigap_high_resolution.png', 'image/png'],
+  '/parallax-bg.jpg': ['../parallax-bg.jpg', 'image/jpeg']
 };
 
 function sendJson(response, status, value) {
@@ -206,9 +236,10 @@ function isValidReportDate(reportDate) {
 }
 
 function validateEntry(entry, requireFollowUp = false) {
-  if (!subtypes[entry.type]?.includes(entry.subtype)) return 'Pilih seksi dan bagian yang sesuai.';
+  if (!sectionOptions.includes(entry.type)) return 'Pilih Seksi Terlapor yang valid.';
   if (!sourceOptions.includes(entry.source)) return 'Pilih sumber aduan yang valid.';
   if (!isValidReportDate(entry.reportDate)) return 'Pilih Tanggal Aduan yang valid.';
+  if (!isValidReportDate(entry.eventDate)) return 'Pilih Tanggal Peristiwa yang valid.';
   if (typeof entry.description !== 'string' || entry.description.length > 5000) return 'Deskripsi Aduan maksimal 5.000 karakter.';
   if (!statusOptions.includes(entry.status)) return 'Pilih Status Aduan yang valid.';
   if ((requireFollowUp && !entry.followUpDate) || (entry.followUpDate && !isValidReportDate(entry.followUpDate))) {
@@ -223,12 +254,12 @@ function validateEntry(entry, requireFollowUp = false) {
   return null;
 }
 
-async function readJson(request) {
+async function readJson(request, maxSize = 16_000) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += Buffer.byteLength(chunk);
-    if (size > 16_000) {
+    if (size > maxSize) {
       throw Object.assign(new Error('Request body is too large.'), { status: 413 });
     }
     chunks.push(chunk);
@@ -238,6 +269,60 @@ async function readJson(request) {
   } catch {
     throw Object.assign(new Error('Request body must be valid JSON.'), { status: 400 });
   }
+}
+
+function parseContentType(header) {
+  const parts = header.split(';').map((p) => p.trim());
+  const type = parts[0];
+  const params = {};
+  for (const p of parts.slice(1)) {
+    const [key, ...valueParts] = p.split('=');
+    if (key && valueParts.length) params[key] = valueParts.join('=').replace(/^"|"$/g, '');
+  }
+  return { type, params };
+}
+
+async function parseMultipart(request) {
+  const contentTypeHeader = request.headers['content-type'] || '';
+  const { type, params } = parseContentType(contentTypeHeader);
+  if (type !== 'multipart/form-data' || !params.boundary) {
+    throw Object.assign(new Error('Expected multipart/form-data.'), { status: 400 });
+  }
+  const boundary = `--${params.boundary}`;
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const body = Buffer.concat(chunks);
+  const text = body.toString('utf8');
+
+  const fields = {};
+  const files = [];
+
+  const parts = text.split(boundary).slice(1, -1);
+  for (const part of parts) {
+    const [headerSection, ...bodySections] = part.split('\r\n\r\n');
+    let bodyPart = bodySections.join('\r\n\r\n');
+    if (bodyPart.endsWith('\r\n')) bodyPart = bodyPart.slice(0, -2);
+
+    const headers = {};
+    for (const line of headerSection.split('\r\n')) {
+      const [key, ...valueParts] = line.split(':');
+      if (key) headers[key.trim()] = valueParts.join(':').trim();
+    }
+
+    const contentDisposition = headers['content-disposition'] || '';
+    const dispositionParams = parseContentType(contentDisposition);
+    const name = dispositionParams.name;
+    const filename = dispositionParams.filename;
+
+    if (filename) {
+      const fileBuffer = Buffer.from(bodyPart, 'utf8');
+      files.push({ name, filename, data: fileBuffer, contentType: headers['content-type'] || 'application/octet-stream' });
+    } else {
+      fields[name] = bodyPart;
+    }
+  }
+
+  return { fields, files };
 }
 
 function validateEntryFilters(month, status, sort) {
@@ -265,7 +350,7 @@ function getFilteredEntries(month, status, sort) {
   const direction = sort === 'oldest' ? 'ASC' : 'DESC';
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return database.prepare(`
-    SELECT id, type, subtype, source, description, report_date, status, follow_up_date, follow_up, created_at
+    SELECT id, type, source, description, report_date, event_date, status, follow_up_date, follow_up, created_at
     FROM entries
     ${where}
     ORDER BY report_date ${direction}, created_at ${direction}, id ${direction}
@@ -288,9 +373,9 @@ const server = createServer(async (request, response) => {
     worksheet.columns = [
       { header: 'No.', key: 'number', width: 8 },
       { header: 'Tanggal Aduan', key: 'reportDate', width: 18 },
+      { header: 'Tanggal Peristiwa', key: 'eventDate', width: 18 },
       { header: 'Seksi Terlapor', key: 'type', width: 48 },
-      { header: 'Bagian', key: 'subtype', width: 36 },
-      { header: 'Sumber Aduan', key: 'source', width: 24 },
+      { header: 'Sarana Pengaduan', key: 'source', width: 30 },
       { header: 'Deskripsi', key: 'description', width: 60 },
       { header: 'Status', key: 'status', width: 28 },
       { header: 'Tanggal Tindak Lanjut', key: 'followUpDate', width: 24 },
@@ -299,8 +384,8 @@ const server = createServer(async (request, response) => {
     worksheet.addRows(entries.map((entry, index) => ({
       number: index + 1,
       reportDate: entry.report_date || '-',
+      eventDate: entry.event_date || '-',
       type: entry.type,
-      subtype: entry.subtype,
       source: entry.source,
       description: entry.description || '-',
       status: entry.status,
@@ -308,7 +393,7 @@ const server = createServer(async (request, response) => {
       followUp: entry.follow_up || '-'
     })));
     worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    worksheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF01243F' } };
+    worksheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF043666' } };
     worksheet.getColumn('description').alignment = { vertical: 'top', wrapText: true };
     worksheet.getColumn('followUp').alignment = { vertical: 'top', wrapText: true };
     worksheet.autoFilter = 'A1:I1';
@@ -342,10 +427,10 @@ const server = createServer(async (request, response) => {
       if (validationError) return sendJson(response, 400, { error: validationError });
       const result = updateEntry.run(
         entry.type,
-        entry.subtype,
         entry.source,
         entry.description.trim(),
         entry.reportDate,
+        entry.eventDate,
         entry.status,
         entry.followUpDate || '',
         entry.followUp,
@@ -353,7 +438,7 @@ const server = createServer(async (request, response) => {
       );
       if (!result.changes) return sendJson(response, 404, { error: 'Aduan tidak ditemukan.' });
       const updated = database.prepare(
-        'SELECT id, type, subtype, source, description, report_date, status, follow_up_date, follow_up, created_at FROM entries WHERE id = ?'
+        'SELECT id, type, source, description, report_date, event_date, status, follow_up_date, follow_up, created_at FROM entries WHERE id = ?'
       ).get(Number(entryRoute[1]));
       return sendJson(response, 200, updated);
     } catch (error) {
@@ -362,7 +447,16 @@ const server = createServer(async (request, response) => {
   }
 
   if (entryRoute && request.method === 'DELETE') {
-    const result = deleteEntry.run(Number(entryRoute[1]));
+    const entryId = Number(entryRoute[1]);
+    const attachments = database.prepare(
+      'SELECT filename FROM entry_attachments WHERE entry_id = ?'
+    ).all(entryId);
+    for (const att of attachments) {
+      try {
+        unlinkSync(join(uploadDir, att.filename));
+      } catch {}
+    }
+    const result = deleteEntry.run(entryId);
     if (!result.changes) return sendJson(response, 404, { error: 'Aduan tidak ditemukan.' });
     return sendJson(response, 200, { deleted: true });
   }
@@ -403,14 +497,16 @@ const server = createServer(async (request, response) => {
     const questionIntervalExpression = granularity === 'month'
       ? "category.month || '-' || printf('%02d', category.day)"
       : 'category.month';
+    const questionWhereClause = scope === 'all' ? '' : 'WHERE category.month >= ? AND category.month < ?';
+    const questionParams = scope === 'all' ? [] : [questionRangeStart, questionRangeEnd];
     const questionRows = database.prepare(`
       SELECT ${questionIntervalExpression} AS interval, SUM(category.value) AS count
       FROM question_categories AS category
       JOIN question_category_catalog AS catalog
         ON catalog.category_index = category.category_index AND catalog.active = 1
-      WHERE category.month >= ? AND category.month < ?
+      ${questionWhereClause}
       GROUP BY interval
-    `).all(questionRangeStart, questionRangeEnd);
+    `).all(...questionParams);
     const questionCounts = new Map(questionRows.map((row) => [row.interval, Number(row.count)]));
     const questionTimeline = timeline.map(({ interval }) => ({
       interval,
@@ -421,26 +517,26 @@ const server = createServer(async (request, response) => {
       FROM question_category_catalog AS catalog
       LEFT JOIN question_categories AS category
         ON category.category_index = catalog.category_index
-        AND category.month >= ? AND category.month < ?
+        ${scope === 'all' ? '' : 'AND category.month >= ? AND category.month < ?'}
       WHERE catalog.active = 1
       GROUP BY catalog.category_index, catalog.name
       ORDER BY catalog.category_index
-    `).all(questionRangeStart, questionRangeEnd).map((category) => ({
+    `).all(...questionParams).map((category) => ({
       ...category,
       count: Number(category.count)
     }));
 
     const selectedSectionRows = database.prepare(`
-      SELECT type, subtype, COUNT(*) AS count
+      SELECT type, COUNT(*) AS count
       FROM entries
       WHERE report_date >= ? AND report_date < ?
-      GROUP BY type, subtype
+      GROUP BY type
     `).all(rangeStart, rangeEnd);
     const allSectionRows = scope === 'all'
       ? database.prepare(`
-        SELECT type, subtype, COUNT(*) AS count
+        SELECT type, COUNT(*) AS count
         FROM entries
-        GROUP BY type, subtype
+        GROUP BY type
       `).all()
       : selectedSectionRows;
     const selectedSourceRows = database.prepare(`
@@ -452,21 +548,14 @@ const server = createServer(async (request, response) => {
     const allSourceRows = scope === 'all'
       ? database.prepare('SELECT source, COUNT(*) AS count FROM entries GROUP BY source').all()
       : selectedSourceRows;
-    const sections = Object.entries(subtypes).map(([type, options]) => ({
-      type,
-      count: 0,
-      subtypes: options.map((subtype) => ({ subtype, count: 0 }))
-    }));
+    const sections = sectionOptions.map((type) => ({ type, count: 0 }));
     const sourceCounts = new Map(allSourceRows.map((row) => [row.source, Number(row.count)]));
     const sources = sourceOptions.map((source) => ({ source, count: sourceCounts.get(source) || 0 }));
 
     for (const row of allSectionRows) {
       const section = sections.find((item) => item.type === row.type);
       if (!section) continue;
-      const count = Number(row.count);
-      section.count += count;
-      const subtype = section.subtypes.find((item) => item.subtype === row.subtype);
-      if (subtype) subtype.count = count;
+      section.count = Number(row.count);
     }
 
     return sendJson(response, 200, {
@@ -492,13 +581,83 @@ const server = createServer(async (request, response) => {
       const validationError = validateEntry(entry);
       if (validationError) return sendJson(response, 400, { error: validationError });
 
-      const result = addEntry.run(entry.type, entry.subtype, entry.source, entry.description.trim(), entry.reportDate, entry.status, '', '');
+      const result = addEntry.run(entry.type, '', entry.source, entry.description.trim(), entry.reportDate, entry.eventDate, entry.status, '', '');
       const savedEntry = database.prepare(
-        'SELECT id, type, subtype, source, description, report_date, status, follow_up_date, follow_up, created_at FROM entries WHERE id = ?'
+        'SELECT id, type, source, description, report_date, event_date, status, follow_up_date, follow_up, created_at FROM entries WHERE id = ?'
       ).get(result.lastInsertRowid);
       return sendJson(response, 201, savedEntry);
     } catch (error) {
       return sendJson(response, error.status || 400, { error: error.message });
+    }
+  }
+
+  const entryAttachRoute = url.pathname.match(/^\/api\/entries\/(\d+)\/attachments$/);
+  if (entryAttachRoute && request.method === 'GET') {
+    const entryId = Number(entryAttachRoute[1]);
+    const attachments = database.prepare(
+      'SELECT id, filename, original_name, created_at FROM entry_attachments WHERE entry_id = ? ORDER BY created_at DESC'
+    ).all(entryId);
+    return sendJson(response, 200, attachments);
+  }
+
+  if (request.method === 'POST' && url.pathname.match(/^\/api\/entries\/(\d+)\/attachments$/)) {
+    const entryIdMatch = url.pathname.match(/^\/api\/entries\/(\d+)\/attachments$/);
+    const entryId = Number(entryIdMatch[1]);
+    const entryExists = database.prepare('SELECT id FROM entries WHERE id = ?').get(entryId);
+    if (!entryExists) return sendJson(response, 404, { error: 'Entry tidak ditemukan.' });
+
+    try {
+      const body = await readJson(request, 50_000_000);
+      const { files } = body;
+      if (!Array.isArray(files)) return sendJson(response, 400, { error: 'Daftar berkas tidak valid.' });
+      const saved = [];
+      for (const file of files) {
+        if (!file.filename || !file.data) continue;
+        const matches = file.data.match(/^data:([^/]+\/[^;]+);base64,(.+)$/);
+        if (!matches) continue;
+        const buffer = Buffer.from(matches[2], 'base64');
+        const ext = (file.filename.split('.').pop() || 'bin').toLowerCase();
+        const safeName = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        const filePath = join(uploadDir, safeName);
+        writeFileSync(filePath, buffer);
+        database.prepare(
+          'INSERT INTO entry_attachments (entry_id, filename, original_name) VALUES (?, ?, ?)'
+        ).run(entryId, safeName, file.filename);
+        saved.push({ filename: safeName, original_name: file.filename });
+      }
+      return sendJson(response, 201, { attachments: saved });
+    } catch (error) {
+      return sendJson(response, error.status || 500, { error: error.message || 'Gagal mengunggah berkas.' });
+    }
+  }
+
+  const attachmentRoute = url.pathname.match(/^\/api\/entries\/(\d+)\/attachments\/(\d+)$/);
+  if (attachmentRoute && request.method === 'DELETE') {
+    const entryId = Number(attachmentRoute[1]);
+    const attachmentId = Number(attachmentRoute[2]);
+    const attachment = database.prepare(
+      'SELECT filename FROM entry_attachments WHERE id = ? AND entry_id = ?'
+    ).get(attachmentId, entryId);
+    if (!attachment) return sendJson(response, 404, { error: 'Berkas tidak ditemukan.' });
+    try {
+      unlinkSync(join(uploadDir, attachment.filename));
+    } catch {}
+    database.prepare('DELETE FROM entry_attachments WHERE id = ?').run(attachmentId);
+    return sendJson(response, 200, { deleted: true });
+  }
+
+  if (request.method === 'GET' && url.pathname.startsWith('/uploads/')) {
+    const filename = url.pathname.slice('/uploads/'.length);
+    const filePath = join(uploadDir, filename);
+    try {
+      const stat = statSync(filePath);
+      if (!stat.isFile()) return sendJson(response, 404, { error: 'Berkas tidak ditemukan.' });
+      const ext = filename.split('.').pop().toLowerCase();
+      const contentTypes = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+      response.writeHead(200, { 'Content-Type': contentTypes[ext] || 'application/octet-stream' });
+      return response.end(readFileSync(filePath));
+    } catch {
+      return sendJson(response, 404, { error: 'Berkas tidak ditemukan.' });
     }
   }
 
@@ -660,7 +819,7 @@ const server = createServer(async (request, response) => {
       return row;
     }));
     worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    worksheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF01243F' } };
+    worksheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF043666' } };
     worksheet.getColumn(1).alignment = { vertical: 'top', wrapText: true };
     worksheet.autoFilter = `A1:${worksheet.getColumn(worksheet.columnCount).letter}1`;
     worksheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
